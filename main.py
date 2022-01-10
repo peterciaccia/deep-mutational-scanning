@@ -135,7 +135,7 @@ class Analyzer:
             #                            key=lambda x: x.score)
 
 
-def run():
+def get_data_paths(get_paths=False):
     data_dir = os.getenv("DATADIR")
     file_list = sorted(
         [file
@@ -143,25 +143,45 @@ def run():
          if file.endswith(".fastq")],
         key=lambda x: int(x.split('/')[-1].split('_')[0])
     )
-    path_list = [os.path.join(data_dir, file)
-                 for file in file_list]
 
-    # makes output directories if not exists
+    if get_paths:
+        path_list = [os.path.join(data_dir, file)
+                     for file in file_list]
+        return path_list
+    else:
+        return file_list
+
+
+def get_output_paths():
     if not os.path.isdir(os.getenv("OUTDIR")):
         os.mkdir(os.getenv("OUTDIR"))
     outdir_list = []
-    for file in file_list:
+    for file in get_data_paths():
         filename_as_dirname = os.path.splitext(file)[0]
         output_directory = os.path.join(os.getenv("OUTDIR"), filename_as_dirname)
         outdir_list.append(output_directory)
         if not os.path.isdir(output_directory):
             os.mkdir(output_directory)
+    return outdir_list
+
+
+def run():
+
+    file_list = get_data_paths()
+
+    # makes output directories if not exists
+
 
     # runs analysis for each fastq file
-    analyses = {}
-    for path, outdir_ in zip(path_list, outdir_list):
-        filename = os.path.basename(path)
-        analyses[filename] = Analyzer(path, outdir_, reanalyze=True)
+    # analyses = {}
+    # for path, outdir_ in zip(path_list, outdir_list):
+    #     filename = os.path.basename(path)
+    #     analyses[filename] = Analyzer(path, outdir_, reanalyze=True)
+    #
+    # for k, v in analyses.items():
+    #     v.sort_records()
+    #     v.make_quality_score_summary()
+    #     v.plot_fastq_gc_content()
 
     for k, v in analyses.items():
         v.sort_records()
