@@ -152,17 +152,19 @@ def get_data_paths(get_paths=False):
         return file_list
 
 
-def get_output_paths():
+def get_output_paths(outfile=None):
     if not os.path.isdir(os.getenv("OUTDIR")):
         os.mkdir(os.getenv("OUTDIR"))
-    outdir_list = []
+    outpath_list = []
     for file in get_data_paths():
         filename_as_dirname = os.path.splitext(file)[0]
-        output_directory = os.path.join(os.getenv("OUTDIR"), filename_as_dirname)
-        outdir_list.append(output_directory)
-        if not os.path.isdir(output_directory):
-            os.mkdir(output_directory)
-    return outdir_list
+        output_path = os.path.join(os.getenv("OUTDIR"), filename_as_dirname)
+        if not os.path.isdir(output_path):
+            os.mkdir(output_path)
+        if outfile is not None:
+            output_path = os.path.join(output_path, outfile)
+        outpath_list.append(output_path)
+    return outpath_list
 
 
 def run():
