@@ -5,6 +5,7 @@ Created by Peter Ciaccia
 # built-ins
 import os
 import math
+import subprocess
 
 # dependencies
 import numpy as np
@@ -22,11 +23,8 @@ load_dotenv()
 
 class Variant:
 
-    def __init__(self, record, alignment):
-        self.record = record
-        self.alignment = alignment
-
-        print(self.record.id)
+    def __init__(self):
+        pass
 
 
 class Analyzer:
@@ -112,30 +110,8 @@ class Analyzer:
         plt.clf()
         return
 
-    def sort_records(self):
 
-        def get_max_alignment():
-            alignments = pairwise2.align.globalxx(sequenceA=reference.seq, sequenceB=record.seq)
-            maximum = max([alignment for alignment in alignments], key=lambda x: x.score)
-            return maximum
-
-        gem_records = {}
-        zpm_records = {}
-        for record in self.parser:
-            score_dict = {}
-            for reference in self.reference_records:
-                score_dict[reference.id] = get_max_alignment()
-
-            filtered_alignment = max(score_dict.items(), key=lambda x: x[1].score)
-            if filtered_alignment[0] == 'ZPM_amplicon':
-                zpm_records[record.id] = Variant(record, filtered_alignment[1])
-            elif filtered_alignment[0] == 'GEM_amplicon':
-                gem_records[record.id] = Variant(record, filtered_alignment[1])
-            # sorted_alignments = sorted([alignment for alignment in alignments],
-            #                            key=lambda x: x.score)
-
-
-def get_data_paths(get_paths=False):
+def get_raw_data_paths(get_paths=False):
     data_dir = os.getenv("DATADIR")
     file_list = sorted(
         [file
@@ -156,7 +132,7 @@ def get_output_paths(outfile=None):
     if not os.path.isdir(os.getenv("OUTDIR")):
         os.mkdir(os.getenv("OUTDIR"))
     outpath_list = []
-    for file in get_data_paths():
+    for file in get_raw_data_paths():
         filename_as_dirname = os.path.splitext(file)[0]
         output_path = os.path.join(os.getenv("OUTDIR"), filename_as_dirname)
         if not os.path.isdir(output_path):
@@ -167,30 +143,46 @@ def get_output_paths(outfile=None):
     return outpath_list
 
 
-def run():
+def get_statistics():
 
-    file_list = get_data_paths()
+    input_path_list = get_raw_data_paths(get_paths=True)
 
-    # makes output directories if not exists
-
-
+    outdir_list = get_output_paths()
     # runs analysis for each fastq file
-    # analyses = {}
-    # for path, outdir_ in zip(path_list, outdir_list):
-    #     filename = os.path.basename(path)
-    #     analyses[filename] = Analyzer(path, outdir_, reanalyze=True)
-    #
-    # for k, v in analyses.items():
-    #     v.sort_records()
-    #     v.make_quality_score_summary()
-    #     v.plot_fastq_gc_content()
+    analyses = {}
+    for path, outdir_ in zip(input_path_list, outdir_list):
+        filename = os.path.basename(path)
+        analyses[filename] = Analyzer(path, outdir_, reanalyze=True)
 
     for k, v in analyses.items():
-        v.sort_records()
         v.make_quality_score_summary()
         v.plot_fastq_gc_content()
 
 
+def merge_reads():
+    for input_path, output_path, outu_path in zip(get_raw_data_paths(get_paths=True),
+                                                  get_output_paths(outfile='merged_reads.fastq'),
+                                                  get_output_paths(outfile='unmerged_reads.fastq')):
+        bbmerge_args = [
+            'bbmerge-auto.sh',
+            f'in={input_path}',
+            f'out={output_path}',
+            f'outu={outu_path}'
+        ]
+        additional_args = [
+            'rem',
+            'k=62',
+            'extend2=50',
+            'ecct'
+        ]
+        bbmerge_args.extend(additional_args)
+        process = subprocess.Popen(bbmerge_args,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+
+
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    run()
+    merge_reads()
+    get_statistics()
