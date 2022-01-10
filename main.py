@@ -14,7 +14,6 @@ import matplotlib.patches as patches
 import pandas as pd
 from Bio import SeqIO
 from Bio.SeqUtils import GC
-from Bio import pairwise2
 from dotenv import load_dotenv
 
 # loads environment variables
@@ -29,22 +28,24 @@ class Variant:
 
 class Analyzer:
 
-    def __init__(self, filename, outdir, reanalyze=False):
-        self.filename = filename
-        self.outdir = outdir
+    def __init__(self, analysis_dir, reanalyze=False):
+        self.analysis_dir = analysis_dir
         self.reference_records = [record for record in
                                   SeqIO.parse(os.getenv("REFERENCE_SEQ_PATH"), 'fasta')]
         self.concat_reference_seq = ''.join([str(record.seq) for record in self.reference_records])
 
-    @property
-    def parser(self):
-        return SeqIO.parse(self.filename, 'fastq')
+    def get_abs_path(self, filename):
+        return os.path.join(self.analysis_dir, filename)
+
+    def fastq_parser(self, filename='merged_reads.fastq'):
+        file_path = self.get_abs_path(filename)
+        return SeqIO.parse(file_path, 'fastq')
 
     def _make_read_df(self, size=None):
 
         records = []
         i = 0
-        for fastq_record in self.parser:
+        for fastq_record in self.fastq_parser():
             if size is not None:
                 i += 1
                 if i > size:
@@ -76,14 +77,14 @@ class Analyzer:
         ax.set_title('GC content', size=15)
 
         # saves figure
-        gc_plot_path = os.path.join(self.outdir, "gc_FWD_and_REV.png")
+        gc_plot_path = os.path.join(self.analysis_dir, "gc_FWD_and_REV.png")
         plt.savefig(gc_plot_path, transparent=True)
         plt.clf()
         return
 
     def make_quality_score_summary(self):
 
-        scores = [record.letter_annotations['phred_quality'] for record in self.parser]
+        scores = [record.letter_annotations['phred_quality'] for record in self.fastq_parser()]
         df = pd.DataFrame(scores)
         length = len(df.T) + 1
 
@@ -105,7 +106,7 @@ class Analyzer:
         ax.set_ylim((0, 40))
         ax.set_title('per base sequence quality')
 
-        quality_score_path = os.path.join(self.outdir, "quality_hist_FWD_and_REV.png")
+        quality_score_path = os.path.join(self.analysis_dir, "quality_hist_FWD_and_REV.png")
         plt.savefig(quality_score_path, transparent=True)
         plt.clf()
         return
@@ -128,7 +129,7 @@ def get_raw_data_paths(get_paths=False):
         return file_list
 
 
-def get_output_paths(outfile=None):
+def get_data_analysis_paths(filename=None):
     if not os.path.isdir(os.getenv("OUTDIR")):
         os.mkdir(os.getenv("OUTDIR"))
     outpath_list = []
@@ -137,22 +138,21 @@ def get_output_paths(outfile=None):
         output_path = os.path.join(os.getenv("OUTDIR"), filename_as_dirname)
         if not os.path.isdir(output_path):
             os.mkdir(output_path)
-        if outfile is not None:
-            output_path = os.path.join(output_path, outfile)
+        if filename is not None:
+            output_path = os.path.join(output_path, filename)
         outpath_list.append(output_path)
     return outpath_list
 
 
-def get_statistics():
+def generate_statistics():
 
-    input_path_list = get_raw_data_paths(get_paths=True)
+    input_path_list = get_data_analysis_paths(filename='merged_reads.fastq')
+    outdir_list = get_data_analysis_paths()
 
-    outdir_list = get_output_paths()
-    # runs analysis for each fastq file
     analyses = {}
     for path, outdir_ in zip(input_path_list, outdir_list):
         filename = os.path.basename(path)
-        analyses[filename] = Analyzer(path, outdir_, reanalyze=True)
+        analyses[filename] = Analyzer(outdir_)
 
     for k, v in analyses.items():
         v.make_quality_score_summary()
@@ -161,8 +161,8 @@ def get_statistics():
 
 def merge_reads():
     for input_path, output_path, outu_path in zip(get_raw_data_paths(get_paths=True),
-                                                  get_output_paths(outfile='merged_reads.fastq'),
-                                                  get_output_paths(outfile='unmerged_reads.fastq')):
+                                                  get_data_analysis_paths(filename='merged_reads.fastq'),
+                                                  get_data_analysis_paths(filename='unmerged_reads.fastq')):
         bbmerge_args = [
             'bbmerge-auto.sh',
             f'in={input_path}',
@@ -185,4 +185,4 @@ def merge_reads():
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     merge_reads()
-    get_statistics()
+    generate_statistics()
