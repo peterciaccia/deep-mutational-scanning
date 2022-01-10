@@ -1,5 +1,10 @@
 """
 Created by Peter Ciaccia
+
+Acknowledgments
+Credit to dmnfarrell (ORDID 0000-0003-3020-7945) for implementations of gc_content, quality score visualizations from
+which Analyzer.plot_fastq_gc_content and Analyzer.make_quality_score_summary were derived:
+https://dmnfarrell.github.io/python/fastq-quality-python
 """
 
 # built-ins
