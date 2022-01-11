@@ -11,6 +11,9 @@ https://dmnfarrell.github.io/python/fastq-quality-python
 import os
 import math
 import subprocess
+from multiprocessing import Pool
+from pathlib import Path
+import shutil
 
 # dependencies
 import numpy as np
@@ -18,6 +21,7 @@ import pylab as plt
 import matplotlib.patches as patches
 import pandas as pd
 from Bio import SeqIO
+from Bio.SeqIO.QualityIO import FastqGeneralIterator
 from Bio.SeqUtils import GC
 from dotenv import load_dotenv
 
@@ -35,12 +39,20 @@ class Analyzer:
 
     def __init__(self, analysis_dir, reanalyze=False):
         self.analysis_dir = analysis_dir
+        self.merged_reads_path = os.path.join(self.analysis_dir, 'merged_reads.fastq')
+        self.alignment_chunks_dir = os.path.join(self.analysis_dir, 'alignment_chunks')
         self.reference_records = [record for record in
                                   SeqIO.parse(os.getenv("REFERENCE_SEQ_PATH"), 'fasta')]
         self.concat_reference_seq = ''.join([str(record.seq) for record in self.reference_records])
 
     def get_abs_path(self, filename):
         return os.path.join(self.analysis_dir, filename)
+
+    def get_unaligned_chunk_path(self, filename):
+        return os.path.join(self.alignment_chunks_dir, 'input', filename)
+
+    def get_aligned_chunk_path(self, filename):
+        return os.path.join(self.alignment_chunks_dir, 'output', filename)
 
     def fastq_parser(self, filename='merged_reads.fastq'):
         file_path = self.get_abs_path(filename)
@@ -84,7 +96,7 @@ class Analyzer:
         # saves figure
         gc_plot_path = os.path.join(self.analysis_dir, "gc_FWD_and_REV.png")
         plt.savefig(gc_plot_path, transparent=True)
-        plt.clf()
+        plt.close()
         return
 
     def make_quality_score_summary(self):
@@ -93,7 +105,7 @@ class Analyzer:
         df = pd.DataFrame(scores)
         length = len(df.T) + 1
 
-        f, ax = plt.subplots(figsize=(12, 5))
+        f, ax = plt.subplots(figsize=(24, 5))
         rect = patches.Rectangle((0, 0), length, 20, linewidth=0, facecolor='r', alpha=.4)
         ax.add_patch(rect)
         rect = patches.Rectangle((0, 20), length, 8, linewidth=0, facecolor='yellow', alpha=.4)
@@ -104,18 +116,79 @@ class Analyzer:
         boxprops = dict(linestyle='-', linewidth=1, color='black')
         df.plot(kind='box', ax=ax, grid=False, showfliers=False,
                 color=dict(boxes='black', whiskers='black'))
-        ax.set_xticks(np.arange(0, length, 5))
-        ax.set_xticklabels(np.arange(0, length, 5))
+        ax.set_xticks(np.arange(0, length, 25))
+        ax.set_xticklabels(np.arange(0, length, 25))
         ax.set_xlabel('position(bp)')
         ax.set_xlim((0, length))
+        ax.set_ylabel('quality score')
         ax.set_ylim((0, 40))
         ax.set_title('per base sequence quality')
 
         quality_score_path = os.path.join(self.analysis_dir, "quality_hist_FWD_and_REV.png")
         plt.savefig(quality_score_path, transparent=True)
-        plt.clf()
+        plt.close()
         return
 
+    def chunk_reads(self, reanalyze=True, chunk_size=400):
+
+        unaligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'input')
+        aligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'output')
+        if reanalyze:
+            try:
+                shutil.rmtree(self.alignment_chunks_dir)
+                print('Directories emptied')
+            except FileNotFoundError:
+                pass
+        if not os.path.isdir(self.alignment_chunks_dir):
+            os.makedirs(unaligned_fasta_dir)
+            os.makedirs(aligned_fasta_dir)
+
+        count = 0
+        chunk = 0
+        with open(self.merged_reads_path, 'r') as in_handle:
+            # parser = SeqIO.parse(in_handle, 'fastq')
+            chunk_str = ''
+            for name, seq, qual in FastqGeneralIterator(in_handle):
+                count += 1
+                fasta_line_length = 60
+                seq = '\n'.join([seq[i:i+fasta_line_length] for i in range(0, len(seq), fasta_line_length)])
+                chunk_str += f'>{name}\n{seq}\n'
+                if count == chunk_size:
+                    chunk_name = f'chunk_{str(chunk).zfill(8)}'
+                    unaligned_chunk_path = os.path.join(unaligned_fasta_dir,
+                                                        f'{chunk_name}.fa')
+                    with open(unaligned_chunk_path, 'w') as f:
+                        f.write(chunk_str)
+                    count = 0
+                    chunk += 1
+                    chunk_str = ''
+
+    def align_chunks(self):
+
+        for file in sorted(os.listdir(os.path.join(self.alignment_chunks_dir, 'input'))):
+            unaligned_chunk_path = self.get_unaligned_chunk_path(file)
+            aligned_chunk_path = self.get_aligned_chunk_path(file)
+            if os.path.isfile(aligned_chunk_path):
+                os.remove(aligned_chunk_path)
+            Path(aligned_chunk_path).touch()
+
+            mafft_args = [
+                'mafft',
+                '--adjustdirection',
+                '--quiet',
+                unaligned_chunk_path,
+                # '>',
+                # aligned_chunk_path
+            ]
+            process = subprocess.Popen(mafft_args,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE
+                                       )
+            stuff = process.communicate()
+
+            out = stuff[0]
+            err = stuff[1]
+            print(f"aligned chunk {os.path.basename(unaligned_chunk_path)}")
 
 def get_raw_data_paths(get_paths=False):
     data_dir = os.getenv("DATADIR")
@@ -155,19 +228,25 @@ def generate_statistics():
     outdir_list = get_data_analysis_paths()
 
     analyses = {}
-    for path, outdir_ in zip(input_path_list, outdir_list):
-        filename = os.path.basename(path)
-        analyses[filename] = Analyzer(outdir_)
+    for outdir_ in outdir_list:
+        analyses[outdir_] = Analyzer(outdir_)
 
     for k, v in analyses.items():
-        v.make_quality_score_summary()
-        v.plot_fastq_gc_content()
+        # v.chunk_reads()
+        v.align_chunks()
+        # v.make_quality_score_summary()
+        # v.plot_fastq_gc_content()
 
 
-def merge_reads():
+def merge_reads(check_first=True):
+
     for input_path, output_path, outu_path in zip(get_raw_data_paths(get_paths=True),
                                                   get_data_analysis_paths(filename='merged_reads.fastq'),
                                                   get_data_analysis_paths(filename='unmerged_reads.fastq')):
+        if check_first:
+            if os.path.isfile(output_path):
+                continue
+
         bbmerge_args = [
             'bbmerge-auto.sh',
             f'in={input_path}',
