@@ -11,7 +11,8 @@ https://dmnfarrell.github.io/python/fastq-quality-python
 import os
 import math
 import subprocess
-from multiprocessing import Pool
+import multiprocessing as mp
+from multiprocessing.pool import ThreadPool
 from pathlib import Path
 import shutil
 
@@ -129,7 +130,21 @@ class Analyzer:
         plt.close()
         return
 
-    def chunk_reads(self, reanalyze=True, chunk_size=400):
+    @staticmethod
+    def _wrap_fasta(sequence, fasta_line_length=60):
+
+        return '\n'.join([sequence[i:i + fasta_line_length]
+                          for i in range(0, len(sequence), fasta_line_length)]
+                         )
+
+    def _get_reference_fasta(self):
+
+        with open(os.getenv("REFERENCE_CONCAT_AMPLICON_PATH"), 'r') as in_handle:
+            record = SeqIO.read(in_handle, "fasta")
+            (name, seq) = (record.id, str(record.seq))
+            return f">{name}\n{self._wrap_fasta(seq)}\n"
+
+    def chunk_reads(self, reanalyze=True, chunk_size=180):
 
         unaligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'input')
         aligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'output')
@@ -147,11 +162,10 @@ class Analyzer:
         chunk = 0
         with open(self.merged_reads_path, 'r') as in_handle:
             # parser = SeqIO.parse(in_handle, 'fastq')
-            chunk_str = ''
+            chunk_str = self._get_reference_fasta()
             for name, seq, qual in FastqGeneralIterator(in_handle):
                 count += 1
-                fasta_line_length = 60
-                seq = '\n'.join([seq[i:i+fasta_line_length] for i in range(0, len(seq), fasta_line_length)])
+                seq = self._wrap_fasta(seq)
                 chunk_str += f'>{name}\n{seq}\n'
                 if count == chunk_size:
                     chunk_name = f'chunk_{str(chunk).zfill(8)}'
@@ -161,9 +175,26 @@ class Analyzer:
                         f.write(chunk_str)
                     count = 0
                     chunk += 1
-                    chunk_str = ''
+                    chunk_str = self._get_reference_fasta()
 
     def align_chunks(self):
+
+        def worker(unaligned_path, aligned_path):
+            print(aligned_path)
+            out_handle = open(aligned_path, 'w')
+            process = subprocess.Popen(mafft_args,
+                                       stdout=out_handle,
+                                       stderr=subprocess.PIPE
+                                       )
+            stuff = process.communicate()
+            out_handle.close()
+
+            out = stuff[0]
+            err = stuff[1]
+            print(f"aligned chunk {os.path.basename(unaligned_path)}")
+
+        # pool = mp.Pool()
+        pool = ThreadPool()
 
         for file in sorted(os.listdir(os.path.join(self.alignment_chunks_dir, 'input'))):
             unaligned_chunk_path = self.get_unaligned_chunk_path(file)
@@ -175,20 +206,18 @@ class Analyzer:
             mafft_args = [
                 'mafft',
                 '--adjustdirection',
+                # '--localpair', '--lop', '-10.00',
                 '--quiet',
+                '--clustalout',
                 unaligned_chunk_path,
                 # '>',
                 # aligned_chunk_path
             ]
-            process = subprocess.Popen(mafft_args,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE
-                                       )
-            stuff = process.communicate()
+            pool.apply_async(worker, (unaligned_chunk_path, aligned_chunk_path))
 
-            out = stuff[0]
-            err = stuff[1]
-            print(f"aligned chunk {os.path.basename(unaligned_chunk_path)}")
+        pool.close()
+        pool.join()
+
 
 def get_raw_data_paths(get_paths=False):
     data_dir = os.getenv("DATADIR")
@@ -232,10 +261,8 @@ def generate_statistics():
         analyses[outdir_] = Analyzer(outdir_)
 
     for k, v in analyses.items():
-        # v.chunk_reads()
-        v.align_chunks()
-        # v.make_quality_score_summary()
-        # v.plot_fastq_gc_content()
+        v.make_quality_score_summary()
+        v.plot_fastq_gc_content()
 
 
 def merge_reads(check_first=True):
@@ -266,7 +293,16 @@ def merge_reads(check_first=True):
         stdout, stderr = process.communicate()
 
 
+def get_variants():
+
+    for analysis_path in get_data_analysis_paths():
+        align_path = os.path.join(os.getenv('PROJECTPATH'), 'align_merged_reads.sh')
+        process = subprocess.Popen([align_path, analysis_path])
+        stdout, stderr = process.communicate()
+
+
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    merge_reads()
-    generate_statistics()
+    # merge_reads()
+    # generate_statistics()
+    get_variants()
