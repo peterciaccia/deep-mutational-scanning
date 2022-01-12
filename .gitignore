@@ -2,3 +2,6 @@
 .idea/
 .DS_Store
 .env
+!bwa_reference/indexed/
+bwa_reference/indexed/*
+!.gitkeep
