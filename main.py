@@ -8,13 +8,18 @@ https://dmnfarrell.github.io/python/fastq-quality-python
 """
 
 # built-ins
+import logging
 import os
 import math
 import subprocess
 import multiprocessing as mp
+from functools import partial
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 import shutil
+from io import StringIO
+import re
+from collections import Counter
 
 # dependencies
 import numpy as np
@@ -28,6 +33,26 @@ from dotenv import load_dotenv
 
 # loads environment variables
 load_dotenv()
+
+# set up logging formatting
+formatter = logging.Formatter(fmt="%(asctime)s %(module)s::%(lineno)d %(levelname)s %(message)s")
+
+
+def setup_logger(log_path, level=logging.INFO):
+    name = os.path.basename(log_path)
+    log_file = os.path.join(log_path, 'log.out')
+
+    handler = logging.FileHandler(log_file)
+    handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+    logger.addHandler(stream_handler)
+
+    return logger
 
 
 class Variant:
@@ -139,7 +164,7 @@ class Analyzer:
 
     def _get_reference_fasta(self):
 
-        with open(os.getenv("REFERENCE_CONCAT_AMPLICON_PATH"), 'r') as in_handle:
+        with open(os.getenv("REFERENCE_SEQ"), 'r') as in_handle:
             record = SeqIO.read(in_handle, "fasta")
             (name, seq) = (record.id, str(record.seq))
             return f">{name}\n{self._wrap_fasta(seq)}\n"
@@ -177,47 +202,6 @@ class Analyzer:
                     chunk += 1
                     chunk_str = self._get_reference_fasta()
 
-    def align_chunks(self):
-
-        def worker(unaligned_path, aligned_path):
-            print(aligned_path)
-            out_handle = open(aligned_path, 'w')
-            process = subprocess.Popen(mafft_args,
-                                       stdout=out_handle,
-                                       stderr=subprocess.PIPE
-                                       )
-            stuff = process.communicate()
-            out_handle.close()
-
-            out = stuff[0]
-            err = stuff[1]
-            print(f"aligned chunk {os.path.basename(unaligned_path)}")
-
-        # pool = mp.Pool()
-        pool = ThreadPool()
-
-        for file in sorted(os.listdir(os.path.join(self.alignment_chunks_dir, 'input'))):
-            unaligned_chunk_path = self.get_unaligned_chunk_path(file)
-            aligned_chunk_path = self.get_aligned_chunk_path(file)
-            if os.path.isfile(aligned_chunk_path):
-                os.remove(aligned_chunk_path)
-            Path(aligned_chunk_path).touch()
-
-            mafft_args = [
-                'mafft',
-                '--adjustdirection',
-                # '--localpair', '--lop', '-10.00',
-                '--quiet',
-                '--clustalout',
-                unaligned_chunk_path,
-                # '>',
-                # aligned_chunk_path
-            ]
-            pool.apply_async(worker, (unaligned_chunk_path, aligned_chunk_path))
-
-        pool.close()
-        pool.join()
-
 
 def get_raw_data_paths(get_paths=False):
     data_dir = os.getenv("DATADIR")
@@ -237,8 +221,10 @@ def get_raw_data_paths(get_paths=False):
 
 
 def get_data_analysis_paths(filename=None):
+    # makes directories if they do not exist
     if not os.path.isdir(os.getenv("OUTDIR")):
         os.mkdir(os.getenv("OUTDIR"))
+
     outpath_list = []
     for file in get_raw_data_paths():
         filename_as_dirname = os.path.splitext(file)[0]
@@ -293,16 +279,174 @@ def merge_reads(check_first=True):
         stdout, stderr = process.communicate()
 
 
-def get_variants():
+def call_variant_freqs():
 
+    align_merged_reads_path = os.path.join(os.getenv('PROJECTPATH'), 'align_merged_reads.sh')
     for analysis_path in get_data_analysis_paths():
-        align_path = os.path.join(os.getenv('PROJECTPATH'), 'align_merged_reads.sh')
-        process = subprocess.Popen([align_path, analysis_path])
+        variants_path = os.path.join(analysis_path, 'var.vcf')
+        process = subprocess.Popen([align_merged_reads_path, analysis_path],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
 
+        with open(variants_path, 'r') as f:
+            """bcftools mpileup uses "##" for comment lines, which read_csv does not support.
+               Pre-processes var.vcf to replace "##" with "%" """
+            file_obj = StringIO(re.sub(r"^#{2,}", "%", f.read(), flags=re.M))
+        df = pd.read_csv(file_obj, comment="%", sep="\t")
+        # TODO: get frequencies of each position
 
-# Press the green button in the gutter to run the script.
+
+def make_variant_sequence(mismatch_list_, position, read_, reference, verbose=False, logger=None):
+
+    if logger is None:
+        raise NotImplementedError
+
+    nums = [int(x) for x in mismatch_list_[0:len(mismatch_list_):2]]
+    nucs = mismatch_list_[1:len(mismatch_list_):2]
+
+    # discards reads with indels
+    if "^" in ''.join(nucs):
+        logger.debug(f"indel in {mismatch_list_}")
+        return None
+    # returns reference if no mutations identified
+    if len(mismatch_list_) == 1:
+        return reference
+    variant_seq = reference[:position-1] + read_ + reference[position-1+len(read_):]
+    if len(variant_seq) != len(reference):
+        print(len(variant_seq))
+
+    if verbose:
+        print(nums, nucs, position)
+        print(f"read:\t{read_[:nums[0]-1]} "
+              f"{read_[nums[0]-1:nums[0]]} "
+              f"{read_[nums[0]:nums[0]+4]}")
+        print(f"ref:\t{reference.seq[position:position+nums[0]-1]} "
+              f"{reference.seq[position+nums[0]-1:position+nums[0]]} "
+              f"{reference.seq[position+nums[0]:position+nums[0]+4]}")
+        print(variant_seq.seq[position:position+30])
+        print(reference.seq[position:position+30])
+        print('')
+
+    # print(len(reference), len(variant_seq))
+    if len(reference) != len(variant_seq):
+        logger.warning("Variant length is not the same as reference length:\n"
+                       f"Mismatches:\t{mismatch_list_}\n"
+                       f"Variant:\t{variant_seq.seq}\n"
+                       f"Reference:\t{reference.seq}"
+                       )
+        # print(nums, nucs, position)
+        # print(variant_seq.translate().seq)
+    return variant_seq
+
+
+def worker(reference_nuc, analysis_path):
+
+    def map_aa_pos(i):
+        """maps pseudoORF aa indices to aa indices in biosensor"""
+        if i <= 373:
+            return i + 139
+        else:
+            return i - 373
+
+    logger = setup_logger(analysis_path)
+    sam_path = os.path.join(analysis_path, "aligned_reads_sorted.sam")
+    header_names = [
+        "QNAME",
+        "FLAG",
+        "RNAME",
+        "POS",
+        "MAPQ",
+        "CIGAR",
+        "RNEXT",
+        "PNEXT",
+        "TLEN",
+        "SEQ",
+        "QUAL",
+        "mismatch_num",
+        "mismatch"
+    ]
+    dtypes = [
+        str,
+        int,
+        str,
+        int,
+        int,
+        str,
+        str,
+        str,
+        int,
+        str,
+        str,
+        str,
+        str
+    ]
+    dtype_dict = dict(zip(header_names, dtypes))
+    df = pd.read_csv(sam_path, comment="@", sep="\t", usecols=range(13),
+                     names=header_names, dtype=dtype_dict)
+
+    logger.info(f"Analyzing {analysis_path}")
+    mutations = []
+    for name, pos, seq, map_col in zip(df['QNAME'],
+                                       df['POS'],
+                                       df['SEQ'],
+                                       df['mismatch']):
+
+        if str(map_col).startswith('MD'):
+            sequence = map_col.split(":")[2]
+            mismatch_list = re.split(r"(\D+)", sequence)
+            variant_nuc = make_variant_sequence(mismatch_list, pos, seq,
+                                                reference_nuc, logger=logger)
+            if variant_nuc is None:
+                continue
+            variant_pept = variant_nuc.translate()
+
+            reference_pept = reference_nuc.translate()
+            aa_pos = map(map_aa_pos, range(len(reference_pept.seq)))
+            for i, ref_aa, var_aa in zip(aa_pos,
+                                         list(reference_pept.seq),
+                                         list(variant_pept.seq)):
+                if ref_aa != var_aa:
+                    mutations.append(''.join([ref_aa, str(i+1), var_aa]))
+
+    counts = Counter(mutations).most_common()
+
+    with open(os.path.join(analysis_path, "substitution_counts.txt"), "w") as f:
+        for k, v in counts:
+            f.write(f"{k}\t{v}\n")
+
+
+def extract_variants_from_sam():
+
+    with open(os.getenv("REFERENCE_SEQ"), "r") as f:
+        reference_nuc_ = SeqIO.read(f, format="fasta")
+
+    pool = mp.Pool()
+    analysis_paths_ = [path_ for path_ in get_data_analysis_paths()]
+    func = partial(worker, reference_nuc_)
+    pool.map(func, analysis_paths_)
+
+
+def run(rerun_all=False, rerun_merge=False, rerun_stats=False,
+        rerun_variant_call=False, rerun_extract_variants=False):
+
+    if rerun_all:
+        merge_reads(check_first=False)
+        generate_statistics()
+        call_variant_freqs()
+        extract_variants_from_sam()
+    else:
+        if rerun_merge:
+            merge_reads(check_first=False)
+        if rerun_stats:
+            generate_statistics()
+        if rerun_variant_call:
+            call_variant_freqs()
+        if rerun_extract_variants:
+            extract_variants_from_sam()
+
+
 if __name__ == '__main__':
-    # merge_reads()
-    # generate_statistics()
-    get_variants()
+    run(
+        rerun_extract_variants=True
+    )
