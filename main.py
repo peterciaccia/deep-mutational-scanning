@@ -14,9 +14,6 @@ import math
 import subprocess
 import multiprocessing as mp
 from functools import partial
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
-import shutil
 from io import StringIO
 import re
 from collections import Counter
@@ -27,7 +24,6 @@ import pylab as plt
 import matplotlib.patches as patches
 import pandas as pd
 from Bio import SeqIO
-from Bio.SeqIO.QualityIO import FastqGeneralIterator
 from Bio.SeqUtils import GC
 from dotenv import load_dotenv
 
@@ -55,15 +51,9 @@ def setup_logger(log_path, level=logging.INFO):
     return logger
 
 
-class Variant:
-
-    def __init__(self):
-        pass
-
-
 class Analyzer:
 
-    def __init__(self, analysis_dir, reanalyze=False):
+    def __init__(self, analysis_dir):
         self.analysis_dir = analysis_dir
         self.merged_reads_path = os.path.join(self.analysis_dir, 'merged_reads.fastq')
         self.alignment_chunks_dir = os.path.join(self.analysis_dir, 'alignment_chunks')
@@ -71,24 +61,18 @@ class Analyzer:
                                   SeqIO.parse(os.getenv("REFERENCE_SEQ_PATH"), 'fasta')]
         self.concat_reference_seq = ''.join([str(record.seq) for record in self.reference_records])
 
-    def get_abs_path(self, filename):
+    def _get_abs_path(self, filename):
         return os.path.join(self.analysis_dir, filename)
 
-    def get_unaligned_chunk_path(self, filename):
-        return os.path.join(self.alignment_chunks_dir, 'input', filename)
-
-    def get_aligned_chunk_path(self, filename):
-        return os.path.join(self.alignment_chunks_dir, 'output', filename)
-
-    def fastq_parser(self, filename='merged_reads.fastq'):
-        file_path = self.get_abs_path(filename)
+    def _fastq_parser(self, filename='merged_reads.fastq'):
+        file_path = self._get_abs_path(filename)
         return SeqIO.parse(file_path, 'fastq')
 
     def _make_read_df(self, size=None):
 
         records = []
         i = 0
-        for fastq_record in self.fastq_parser():
+        for fastq_record in self._fastq_parser():
             if size is not None:
                 i += 1
                 if i > size:
@@ -127,7 +111,7 @@ class Analyzer:
 
     def make_quality_score_summary(self):
 
-        scores = [record.letter_annotations['phred_quality'] for record in self.fastq_parser()]
+        scores = [record.letter_annotations['phred_quality'] for record in self._fastq_parser()]
         df = pd.DataFrame(scores)
         length = len(df.T) + 1
 
@@ -139,7 +123,7 @@ class Analyzer:
         rect = patches.Rectangle((0, 28), length, 12, linewidth=0, facecolor='g', alpha=.4)
         ax.add_patch(rect)
         df.mean().plot(ax=ax, c='black')
-        boxprops = dict(linestyle='-', linewidth=1, color='black')
+        # boxprops = dict(linestyle='-', linewidth=1, color='black')
         df.plot(kind='box', ax=ax, grid=False, showfliers=False,
                 color=dict(boxes='black', whiskers='black'))
         ax.set_xticks(np.arange(0, length, 25))
@@ -154,53 +138,6 @@ class Analyzer:
         plt.savefig(quality_score_path, transparent=True)
         plt.close()
         return
-
-    @staticmethod
-    def _wrap_fasta(sequence, fasta_line_length=60):
-
-        return '\n'.join([sequence[i:i + fasta_line_length]
-                          for i in range(0, len(sequence), fasta_line_length)]
-                         )
-
-    def _get_reference_fasta(self):
-
-        with open(os.getenv("REFERENCE_SEQ"), 'r') as in_handle:
-            record = SeqIO.read(in_handle, "fasta")
-            (name, seq) = (record.id, str(record.seq))
-            return f">{name}\n{self._wrap_fasta(seq)}\n"
-
-    def chunk_reads(self, reanalyze=True, chunk_size=180):
-
-        unaligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'input')
-        aligned_fasta_dir = os.path.join(self.alignment_chunks_dir, 'output')
-        if reanalyze:
-            try:
-                shutil.rmtree(self.alignment_chunks_dir)
-                print('Directories emptied')
-            except FileNotFoundError:
-                pass
-        if not os.path.isdir(self.alignment_chunks_dir):
-            os.makedirs(unaligned_fasta_dir)
-            os.makedirs(aligned_fasta_dir)
-
-        count = 0
-        chunk = 0
-        with open(self.merged_reads_path, 'r') as in_handle:
-            # parser = SeqIO.parse(in_handle, 'fastq')
-            chunk_str = self._get_reference_fasta()
-            for name, seq, qual in FastqGeneralIterator(in_handle):
-                count += 1
-                seq = self._wrap_fasta(seq)
-                chunk_str += f'>{name}\n{seq}\n'
-                if count == chunk_size:
-                    chunk_name = f'chunk_{str(chunk).zfill(8)}'
-                    unaligned_chunk_path = os.path.join(unaligned_fasta_dir,
-                                                        f'{chunk_name}.fa')
-                    with open(unaligned_chunk_path, 'w') as f:
-                        f.write(chunk_str)
-                    count = 0
-                    chunk += 1
-                    chunk_str = self._get_reference_fasta()
 
 
 def get_raw_data_paths(get_paths=False):
@@ -239,7 +176,6 @@ def get_data_analysis_paths(filename=None):
 
 def generate_statistics():
 
-    input_path_list = get_data_analysis_paths(filename='merged_reads.fastq')
     outdir_list = get_data_analysis_paths()
 
     analyses = {}
@@ -328,15 +264,13 @@ def make_variant_sequence(mismatch_list_, position, read_, reference, verbose=Fa
         print(reference.seq[position:position+30])
         print('')
 
-    # print(len(reference), len(variant_seq))
     if len(reference) != len(variant_seq):
         logger.warning("Variant length is not the same as reference length:\n"
                        f"Mismatches:\t{mismatch_list_}\n"
                        f"Variant:\t{variant_seq.seq}\n"
                        f"Reference:\t{reference.seq}"
                        )
-        # print(nums, nucs, position)
-        # print(variant_seq.translate().seq)
+
     return variant_seq
 
 
